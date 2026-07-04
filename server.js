@@ -6,7 +6,6 @@ const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
 
 app.use(cors({
   origin: '*',
@@ -19,17 +18,14 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/product-catalog';
 
-mongoose.connect(MONGODB_URI, {
-  serverSelectionTimeoutMS: 5000,
-  bufferCommands: false,
-})
-  .then(() => {
-    console.log('Successfully connected to MongoDB.');
-    seedAdminUser();
-  })
-  .catch(err => {
-    console.error('Error connecting to MongoDB:', err.message);
-  });
+let isConnected = false;
+
+async function connectDB() {
+  if (isConnected) return;
+  await mongoose.connect(MONGODB_URI);
+  isConnected = true;
+  console.log('MongoDB connected!');
+}
 
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -44,8 +40,8 @@ const productSchema = new mongoose.Schema({
   description: { type: String, required: true, trim: true }
 }, { timestamps: true });
 
-const User = mongoose.model('User', userSchema);
-const Product = mongoose.model('Product', productSchema);
+const User = mongoose.models.User || mongoose.model('User', userSchema);
+const Product = mongoose.models.Product || mongoose.model('Product', productSchema);
 
 async function seedAdminUser() {
   try {
@@ -73,6 +69,13 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
+
+// DB connect middleware
+app.use(async (req, res, next) => {
+  await connectDB();
+  await seedAdminUser();
+  next();
+});
 
 app.post('/api/auth/login', async (req, res) => {
   try {
@@ -184,6 +187,9 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
   }
 });
 
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
+
+module.exports = app;
