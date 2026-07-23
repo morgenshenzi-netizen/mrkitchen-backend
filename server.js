@@ -60,6 +60,38 @@ async function seedAdminUser() {
   }
 }
 
+// In-memory Rate Limiting for Login Protection
+const loginAttempts = new Map();
+
+const rateLimitLogin = (req, res, next) => {
+  const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+  const now = Date.now();
+  const attemptData = loginAttempts.get(ip) || { count: 0, lockUntil: 0 };
+
+  if (attemptData.lockUntil > now) {
+    const remainingMins = Math.ceil((attemptData.lockUntil - now) / (60 * 1000));
+    return res.status(429).json({ 
+      message: `Too many failed login attempts. Account temporarily locked. Please try again in ${remainingMins} minute(s).` 
+    });
+  }
+  req.loginAttemptIp = ip;
+  next();
+};
+
+function recordFailedLogin(ip) {
+  const now = Date.now();
+  const attemptData = loginAttempts.get(ip) || { count: 0, lockUntil: 0 };
+  attemptData.count += 1;
+  if (attemptData.count >= 5) {
+    attemptData.lockUntil = now + 15 * 60 * 1000; // Lock out for 15 minutes after 5 failures
+  }
+  loginAttempts.set(ip, attemptData);
+}
+
+function resetLoginAttempts(ip) {
+  loginAttempts.delete(ip);
+}
+
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -78,14 +110,24 @@ app.use(async (req, res, next) => {
   next();
 });
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', rateLimitLogin, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: 'Email and password are required.' });
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) return res.status(400).json({ message: 'Invalid email or password.' });
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    if (!user) {
+      recordFailedLogin(req.loginAttemptIp);
+      return res.status(400).json({ message: 'Invalid email or password.' });
+    }
     const validPassword = await bcrypt.compare(password, user.password);
-    if (!validPassword) return res.status(400).json({ message: 'Invalid email or password.' });
+    if (!validPassword) {
+      recordFailedLogin(req.loginAttemptIp);
+      return res.status(400).json({ message: 'Invalid email or password.' });
+    }
+    
+    // Successful login - reset brute force counter
+    resetLoginAttempts(req.loginAttemptIp);
+
     const token = jwt.sign(
       { id: user._id, email: user.email },
       process.env.JWT_SECRET || 'fallback_secret_key_12345',
@@ -99,6 +141,44 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/auth/verify', authenticateToken, (req, res) => {
   res.json({ valid: true, email: req.user.email });
+});
+
+// Change Admin Email / Password Endpoint
+app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
+  try {
+    const { currentPassword, newEmail, newPassword } = req.body;
+    if (!currentPassword) {
+      return res.status(400).json({ message: 'Current password is required.' });
+    }
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User account not found.' });
+
+    const validPassword = await bcrypt.compare(currentPassword, user.password);
+    if (!validPassword) {
+      return res.status(400).json({ message: 'Current password is incorrect.' });
+    }
+
+    if (newEmail && newEmail.trim() !== '') {
+      const emailLower = newEmail.trim().toLowerCase();
+      const existingUser = await User.findOne({ email: emailLower, _id: { $ne: user._id } });
+      if (existingUser) {
+        return res.status(400).json({ message: 'Email is already in use by another user.' });
+      }
+      user.email = emailLower;
+    }
+
+    if (newPassword && newPassword.trim() !== '') {
+      if (newPassword.trim().length < 8) {
+        return res.status(400).json({ message: 'New password must be at least 8 characters long.' });
+      }
+      user.password = await bcrypt.hash(newPassword.trim(), 10);
+    }
+
+    await user.save();
+    res.json({ message: 'Account credentials updated successfully. Please log in with your new credentials.', email: user.email });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update credentials.', error: error.message });
+  }
 });
 
 app.get('/api/products', async (req, res) => {
