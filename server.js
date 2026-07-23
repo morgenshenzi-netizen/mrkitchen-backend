@@ -37,7 +37,8 @@ const productSchema = new mongoose.Schema({
   code: { type: String, required: true, unique: true, trim: true },
   name: { type: String, required: true, trim: true },
   price: { type: Number, required: true },
-  description: { type: String, required: true, trim: true }
+  description: { type: String, required: true, trim: true },
+  isAvailable: { type: Boolean, default: true }
 }, { timestamps: true });
 
 const User = mongoose.models.User || mongoose.model('User', userSchema);
@@ -139,14 +140,19 @@ app.get('/api/products/:id', async (req, res) => {
 
 app.post('/api/products', authenticateToken, async (req, res) => {
   try {
-    const { images, code, name, price, description } = req.body;
+    const { images, code, name, price, description, isAvailable } = req.body;
     if (!images || !Array.isArray(images) || images.length === 0 || !code || !name || !price || !description) {
       return res.status(400).json({ message: 'All fields are required.' });
     }
     const existingProduct = await Product.findOne({ code: code.trim() });
     if (existingProduct) return res.status(400).json({ message: `Product code "${code}" already exists.` });
     const newProduct = new Product({
-      images, code: code.trim(), name: name.trim(), price: Number(price), description: description.trim()
+      images,
+      code: code.trim(),
+      name: name.trim(),
+      price: Number(price),
+      description: description.trim(),
+      isAvailable: isAvailable !== undefined ? Boolean(isAvailable) : true
     });
     await newProduct.save();
     res.status(201).json({ message: 'Product added successfully.', product: newProduct });
@@ -157,7 +163,7 @@ app.post('/api/products', authenticateToken, async (req, res) => {
 
 app.put('/api/products/:id', authenticateToken, async (req, res) => {
   try {
-    const { images, code, name, price, description } = req.body;
+    const { images, code, name, price, description, isAvailable } = req.body;
     if (!images || !Array.isArray(images) || images.length === 0 || !code || !name || !price || !description) {
       return res.status(400).json({ message: 'All fields are required.' });
     }
@@ -170,6 +176,9 @@ app.put('/api/products/:id', authenticateToken, async (req, res) => {
     product.name = name.trim();
     product.price = Number(price);
     product.description = description.trim();
+    if (isAvailable !== undefined) {
+      product.isAvailable = Boolean(isAvailable);
+    }
     await product.save();
     res.json({ message: 'Product updated successfully.', product });
   } catch (error) {
@@ -193,3 +202,4 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+
