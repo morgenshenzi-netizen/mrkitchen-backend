@@ -183,8 +183,39 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
 
 app.get('/api/products', async (req, res) => {
   try {
-    const products = await Product.find().sort({ createdAt: -1 }).allowDiskUse(true);
-    res.json(products);
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // List view never sends the heavy base64 images array — just an
+    // "imageCount" so the frontend carousel/dots still know how many
+    // images exist. Actual image bytes load lazily via
+    // GET /api/products/:id/images/:index (used as <img src>).
+    const [products, total] = await Promise.all([
+      Product.aggregate([
+        { $sort: { createdAt: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+        {
+          $project: {
+            code: 1,
+            name: 1,
+            price: 1,
+            description: 1,
+            isAvailable: 1,
+            createdAt: 1,
+            imageCount: { $size: '$images' }
+          }
+        }
+      ]),
+      Product.countDocuments()
+    ]);
+
+    res.json({
+      products,
+      hasMore: skip + products.length < total,
+      total
+    });
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch products.', error: error.message });
   }
@@ -282,4 +313,3 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
-
