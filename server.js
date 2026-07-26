@@ -41,8 +41,23 @@ const productSchema = new mongoose.Schema({
   isAvailable: { type: Boolean, default: true }
 }, { timestamps: true });
 
+const settingsSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true, default: 'site' },
+  maintenanceMode: { type: Boolean, default: false },
+  maintenanceMessage: { type: String, default: 'We are currently performing scheduled maintenance. Please check back shortly.' }
+});
+
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 const Product = mongoose.models.Product || mongoose.model('Product', productSchema);
+const Settings = mongoose.models.Settings || mongoose.model('Settings', settingsSchema);
+
+async function getSettings() {
+  let settings = await Settings.findOne({ key: 'site' });
+  if (!settings) {
+    settings = await Settings.create({ key: 'site' });
+  }
+  return settings;
+}
 
 async function seedAdminUser() {
   try {
@@ -181,7 +196,54 @@ app.post('/api/auth/change-password', authenticateToken, async (req, res) => {
   }
 });
 
-app.get('/api/products', async (req, res) => {
+// Maintenance mode gate — blocks public catalog routes while ON, but lets
+// requests carrying a valid admin token through so the admin panel keeps working.
+async function checkMaintenance(req, res, next) {
+  try {
+    const settings = await getSettings();
+    if (!settings.maintenanceMode) return next();
+
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (token) {
+      try {
+        jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret_key_12345');
+        return next(); // valid admin session — allow through even during maintenance
+      } catch (e) {
+        // invalid/expired token — fall through to maintenance block below
+      }
+    }
+    return res.status(503).json({ maintenance: true, message: settings.maintenanceMessage });
+  } catch (error) {
+    return next(); // fail open — a settings bug should never take the whole site down
+  }
+}
+
+// Public: check current maintenance status (used by the customer-facing site)
+app.get('/api/status', async (req, res) => {
+  try {
+    const settings = await getSettings();
+    res.json({ maintenanceMode: settings.maintenanceMode, message: settings.maintenanceMessage });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch site status.', error: error.message });
+  }
+});
+
+// Admin only: toggle maintenance mode on/off, optionally update the message
+app.put('/api/settings/maintenance', authenticateToken, async (req, res) => {
+  try {
+    const { maintenanceMode, message } = req.body;
+    const settings = await getSettings();
+    if (maintenanceMode !== undefined) settings.maintenanceMode = Boolean(maintenanceMode);
+    if (message !== undefined && message.trim() !== '') settings.maintenanceMessage = message.trim();
+    await settings.save();
+    res.json({ message: 'Maintenance settings updated.', maintenanceMode: settings.maintenanceMode, maintenanceMessage: settings.maintenanceMessage });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update maintenance settings.', error: error.message });
+  }
+});
+
+app.get('/api/products', checkMaintenance, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -221,7 +283,7 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-app.get('/api/products/:id/images/:index', async (req, res) => {
+app.get('/api/products/:id/images/:index', checkMaintenance, async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found.' });
@@ -239,7 +301,7 @@ app.get('/api/products/:id/images/:index', async (req, res) => {
   }
 });
 
-app.get('/api/products/:id', async (req, res) => {
+app.get('/api/products/:id', checkMaintenance, async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found.' });
